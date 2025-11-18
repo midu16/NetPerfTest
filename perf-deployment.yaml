@@ -1,0 +1,32 @@
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: perf-pod
+  namespace: network-tools
+  labels:
+    app: perf-tools
+spec:
+  hostNetwork: true
+  hostPID: true
+  nodeSelector:
+    kubernetes.io/hostname: hub-ctlplane-0.5g-deployment.lab
+  containers:
+  - name: perf-tools
+    image: quay.io/midu/perf-tools:latest
+    imagePullPolicy: Always
+    securityContext:
+      privileged: true
+      capabilities:
+        add:
+        - SYS_ADMIN
+        - SYS_PTRACE
+        - PERFMON
+    resources:
+      limits:
+        cpu: "2"
+        memory: 2Gi
+      requests:
+        cpu: "500m"
+        memory: 512Mi
+  restartPolicy: Always

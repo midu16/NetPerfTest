@@ -1,0 +1,31 @@
+FROM registry.fedoraproject.org/fedora:latest
+
+LABEL maintainer="Mihai IDU <midu@redhat.com>" \
+      description="Fedora-based container with tcpdump and iperf3 for network testing" \
+      version="1.0"
+
+# Update system and install network tools
+RUN dnf update -y && \
+    dnf install -y \
+        tcpdump \
+        iperf3 \
+        iproute \
+        iputils \
+        bind-utils \
+        net-tools \
+        procps-ng \
+        vim-minimal \
+        && dnf clean all
+
+# Create a non-root user (optional but good practice)
+RUN useradd -r -u 1001 -g root nettools
+
+# Set working directory
+WORKDIR /data
+
+# Create directory for packet captures
+RUN mkdir -p /data/pcaps && chmod 777 /data/pcaps
+
+# Default command - keep container running
+CMD ["/bin/bash", "-c", "echo 'Network tools container ready. tcpdump and iperf3 available.' && sleep infinity"]
+

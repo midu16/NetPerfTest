@@ -1,0 +1,30 @@
+apiVersion: performance.openshift.io/v2
+kind: PerformanceProfile
+metadata:
+  name: perf-profile-48c
+spec:
+  additionalKernelArgs:
+  - nohz_full=2-19,22-39
+  cpu:
+    balanceIsolated: false
+    isolated: 2-19,22-39
+    reserved: 0-1,20-21
+  globallyDisableIrqLoadBalancing: true
+  hugepages:
+    defaultHugepagesSize: 1G
+    pages:
+    - count: 30
+      size: 1G
+  kernelPageSize: 4k
+  net:
+    userLevelNetworking: true
+  nodeSelector:
+    node-role.kubernetes.io/master: ""
+  numa:
+    topologyPolicy: single-numa-node
+  realTimeKernel:
+    enabled: false
+  workloadHints:
+    highPowerConsumption: false
+    perPodPowerManagement: true
+    realTime: false
