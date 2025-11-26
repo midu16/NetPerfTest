@@ -7,21 +7,27 @@ metadata:
   labels:
     app: perf-tools
 spec:
-  hostNetwork: true
-  hostPID: true
+  hostNetwork: false
+  hostPID: false
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
   nodeSelector:
-    kubernetes.io/hostname: hub-ctlplane-0.5g-deployment.lab
+    kubernetes.io/hostname: ocp-sno1
   containers:
   - name: perf-tools
     image: quay.io/midu/perf-tools:latest
     imagePullPolicy: Always
     securityContext:
-      privileged: true
+      privileged: false
+      allowPrivilegeEscalation: false
+      runAsNonRoot: true
       capabilities:
-        add:
-        - SYS_ADMIN
-        - SYS_PTRACE
-        - PERFMON
+        drop:
+        - ALL
+      seccompProfile:
+        type: RuntimeDefault
     resources:
       limits:
         cpu: "2"

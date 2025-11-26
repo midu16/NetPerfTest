@@ -23,7 +23,7 @@ PERF_IMAGE_FULL = $(IMAGE_REGISTRY)/$(IMAGE_NAMESPACE)/$(PERF_IMAGE_NAME):$(PERF
 
 # Kernel version configuration
 TARGET_KERNEL ?= 5.14.0-586
-NODE_NAME ?= hub-ctlplane-0.5g-deployment.lab
+NODE_NAME ?= ocp-sno1
 
 .PHONY: help
 help:
@@ -68,6 +68,7 @@ help:
 	@printf "  IMAGE_TAG=\033[33m$(IMAGE_TAG)\033[0m\n"
 	@printf "  IMAGE_FULL=\033[33m$(IMAGE_FULL)\033[0m\n"
 	@printf "  NAMESPACE=\033[33m$(NAMESPACE)\033[0m\n"
+	@printf "  NODE_NAME=\033[33m$(NODE_NAME)\033[0m\n"
 	@printf "  KUBECONFIG=\033[33m$(KUBECONFIG)\033[0m\n\n"
 	@printf "\033[1mExample Usage:\033[0m\n"
 	@printf "  \033[36mmake build-push\033[0m\n"
@@ -146,10 +147,7 @@ create-namespace: check-kubeconfig
 		oc create namespace $(NAMESPACE) && \
 		printf "\033[32m✓ Namespace $(NAMESPACE) created\033[0m\n"; \
 	fi
-	@printf "\033[1m🔐 Applying privileged SCC...\033[0m\n"
-	@export KUBECONFIG=$(KUBECONFIG) && \
-	oc adm policy add-scc-to-user privileged -z default -n $(NAMESPACE) || true
-	@printf "\033[32m✓ SCC applied\033[0m\n"
+	@printf "\033[33mℹ️  Using PodSecurity restricted policy - no SCC needed\033[0m\n"
 
 .PHONY: generate-deployment
 generate-deployment:
@@ -165,20 +163,26 @@ generate-deployment:
 	@printf "    instance: cat-1\n" >> deployment.yaml
 	@printf "spec:\n" >> deployment.yaml
 	@printf "  hostNetwork: false\n" >> deployment.yaml
-	@printf "  hostPID: true\n" >> deployment.yaml
+	@printf "  hostPID: false\n" >> deployment.yaml
+	@printf "  securityContext:\n" >> deployment.yaml
+	@printf "    runAsNonRoot: true\n" >> deployment.yaml
+	@printf "    seccompProfile:\n" >> deployment.yaml
+	@printf "      type: RuntimeDefault\n" >> deployment.yaml
 	@printf "  nodeSelector:\n" >> deployment.yaml
-	@printf "    kubernetes.io/hostname: hub-ctlplane-0.5g-deployment.lab\n" >> deployment.yaml
+	@printf "    kubernetes.io/hostname: %s\n" "$(NODE_NAME)" >> deployment.yaml
 	@printf "  containers:\n" >> deployment.yaml
 	@printf "  - name: network-tools\n" >> deployment.yaml
 	@printf "    image: %s\n" "$(IMAGE_FULL)" >> deployment.yaml
 	@printf "    imagePullPolicy: Always\n" >> deployment.yaml
 	@printf "    securityContext:\n" >> deployment.yaml
-	@printf "      privileged: true\n" >> deployment.yaml
+	@printf "      privileged: false\n" >> deployment.yaml
+	@printf "      allowPrivilegeEscalation: false\n" >> deployment.yaml
+	@printf "      runAsNonRoot: true\n" >> deployment.yaml
 	@printf "      capabilities:\n" >> deployment.yaml
-	@printf "        add:\n" >> deployment.yaml
-	@printf "        - NET_ADMIN\n" >> deployment.yaml
-	@printf "        - NET_RAW\n" >> deployment.yaml
-	@printf "        - SYS_ADMIN\n" >> deployment.yaml
+	@printf "        drop:\n" >> deployment.yaml
+	@printf "        - ALL\n" >> deployment.yaml
+	@printf "      seccompProfile:\n" >> deployment.yaml
+	@printf "        type: RuntimeDefault\n" >> deployment.yaml
 	@printf "    resources:\n" >> deployment.yaml
 	@printf "      limits:\n" >> deployment.yaml
 	@printf "        cpu: \"2\"\n" >> deployment.yaml
@@ -204,20 +208,26 @@ generate-deployment:
 	@printf "    instance: cat-2\n" >> deployment.yaml
 	@printf "spec:\n" >> deployment.yaml
 	@printf "  hostNetwork: false\n" >> deployment.yaml
-	@printf "  hostPID: true\n" >> deployment.yaml
+	@printf "  hostPID: false\n" >> deployment.yaml
+	@printf "  securityContext:\n" >> deployment.yaml
+	@printf "    runAsNonRoot: true\n" >> deployment.yaml
+	@printf "    seccompProfile:\n" >> deployment.yaml
+	@printf "      type: RuntimeDefault\n" >> deployment.yaml
 	@printf "  nodeSelector:\n" >> deployment.yaml
-	@printf "    kubernetes.io/hostname: hub-ctlplane-0.5g-deployment.lab\n" >> deployment.yaml
+	@printf "    kubernetes.io/hostname: %s\n" "$(NODE_NAME)" >> deployment.yaml
 	@printf "  containers:\n" >> deployment.yaml
 	@printf "  - name: network-tools\n" >> deployment.yaml
 	@printf "    image: %s\n" "$(IMAGE_FULL)" >> deployment.yaml
 	@printf "    imagePullPolicy: Always\n" >> deployment.yaml
 	@printf "    securityContext:\n" >> deployment.yaml
-	@printf "      privileged: true\n" >> deployment.yaml
+	@printf "      privileged: false\n" >> deployment.yaml
+	@printf "      allowPrivilegeEscalation: false\n" >> deployment.yaml
+	@printf "      runAsNonRoot: true\n" >> deployment.yaml
 	@printf "      capabilities:\n" >> deployment.yaml
-	@printf "        add:\n" >> deployment.yaml
-	@printf "        - NET_ADMIN\n" >> deployment.yaml
-	@printf "        - NET_RAW\n" >> deployment.yaml
-	@printf "        - SYS_ADMIN\n" >> deployment.yaml
+	@printf "        drop:\n" >> deployment.yaml
+	@printf "        - ALL\n" >> deployment.yaml
+	@printf "      seccompProfile:\n" >> deployment.yaml
+	@printf "        type: RuntimeDefault\n" >> deployment.yaml
 	@printf "    resources:\n" >> deployment.yaml
 	@printf "      limits:\n" >> deployment.yaml
 	@printf "        cpu: \"2\"\n" >> deployment.yaml
@@ -243,9 +253,13 @@ generate-deployment:
 	@printf "    instance: cat-3\n" >> deployment.yaml
 	@printf "spec:\n" >> deployment.yaml
 	@printf "  hostNetwork: false\n" >> deployment.yaml
-	@printf "  hostPID: true\n" >> deployment.yaml
+	@printf "  hostPID: false\n" >> deployment.yaml
+	@printf "  securityContext:\n" >> deployment.yaml
+	@printf "    runAsNonRoot: true\n" >> deployment.yaml
+	@printf "    seccompProfile:\n" >> deployment.yaml
+	@printf "      type: RuntimeDefault\n" >> deployment.yaml
 	@printf "  nodeSelector:\n" >> deployment.yaml
-	@printf "    kubernetes.io/hostname: hub-ctlplane-2.5g-deployment.lab\n" >> deployment.yaml
+	@printf "    kubernetes.io/hostname: %s\n" "$(NODE_NAME)" >> deployment.yaml
 	@printf "  containers:\n" >> deployment.yaml
 	@printf "  - name: network-tools\n" >> deployment.yaml
 	@printf "    image: %s\n" "$(IMAGE_FULL)" >> deployment.yaml
@@ -398,21 +412,27 @@ generate-perf-deployment:
 	@printf "  labels:\n" >> perf-deployment.yaml
 	@printf "    app: perf-tools\n" >> perf-deployment.yaml
 	@printf "spec:\n" >> perf-deployment.yaml
-	@printf "  hostNetwork: true\n" >> perf-deployment.yaml
-	@printf "  hostPID: true\n" >> perf-deployment.yaml
+	@printf "  hostNetwork: false\n" >> perf-deployment.yaml
+	@printf "  hostPID: false\n" >> perf-deployment.yaml
+	@printf "  securityContext:\n" >> perf-deployment.yaml
+	@printf "    runAsNonRoot: true\n" >> perf-deployment.yaml
+	@printf "    seccompProfile:\n" >> perf-deployment.yaml
+	@printf "      type: RuntimeDefault\n" >> perf-deployment.yaml
 	@printf "  nodeSelector:\n" >> perf-deployment.yaml
-	@printf "    kubernetes.io/hostname: hub-ctlplane-0.5g-deployment.lab\n" >> perf-deployment.yaml
+	@printf "    kubernetes.io/hostname: %s\n" "$(NODE_NAME)" >> perf-deployment.yaml
 	@printf "  containers:\n" >> perf-deployment.yaml
 	@printf "  - name: perf-tools\n" >> perf-deployment.yaml
 	@printf "    image: %s\n" "$(PERF_IMAGE_FULL)" >> perf-deployment.yaml
 	@printf "    imagePullPolicy: Always\n" >> perf-deployment.yaml
 	@printf "    securityContext:\n" >> perf-deployment.yaml
-	@printf "      privileged: true\n" >> perf-deployment.yaml
+	@printf "      privileged: false\n" >> perf-deployment.yaml
+	@printf "      allowPrivilegeEscalation: false\n" >> perf-deployment.yaml
+	@printf "      runAsNonRoot: true\n" >> perf-deployment.yaml
 	@printf "      capabilities:\n" >> perf-deployment.yaml
-	@printf "        add:\n" >> perf-deployment.yaml
-	@printf "        - SYS_ADMIN\n" >> perf-deployment.yaml
-	@printf "        - SYS_PTRACE\n" >> perf-deployment.yaml
-	@printf "        - PERFMON\n" >> perf-deployment.yaml
+	@printf "        drop:\n" >> perf-deployment.yaml
+	@printf "        - ALL\n" >> perf-deployment.yaml
+	@printf "      seccompProfile:\n" >> perf-deployment.yaml
+	@printf "        type: RuntimeDefault\n" >> perf-deployment.yaml
 	@printf "    resources:\n" >> perf-deployment.yaml
 	@printf "      limits:\n" >> perf-deployment.yaml
 	@printf "        cpu: \"2\"\n" >> perf-deployment.yaml

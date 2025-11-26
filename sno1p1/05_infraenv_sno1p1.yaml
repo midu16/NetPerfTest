@@ -1,0 +1,19 @@
+---
+apiVersion: agent-install.openshift.io/v1beta1
+kind: InfraEnv
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+  name: sno1p1
+  namespace: sno1
+spec:
+  additionalNTPSources:
+    - infra.5g-deployment.lab
+  clusterRef:
+    name: sno1
+    namespace: sno1
+  sshAuthorizedKey: 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCZ+AP2ZRIkY3xJ2XtqVM+qZXvcSn3k15aeJiDqAdDe0jYf4/m/gefmpi3Hvn4Y87bL5edyodaYCdlXf2ZcfhSyMPh7zojPFEgu3A5AlgHtSLUy2jx0TdHFTUPmfZU8fncq31qq+p2IvdJwySxYS8ubru+C1TU0u0sOOeHqxsQJQ9JiB5myXZCNV7J4Re4uUBvX+2IujwedQOfMeN21cPXQ3UIj54qwbwPENBdneS2j2x35joa+6eEvyqd1YOyF8lEaRYaNyW2lSb5Vz6a/WNHLsD/MHRxp3UkDexxrYHAIz/U/ZvUlTDW25rUmR8OcdCBPsf9mI/fGVqzqnSqiV8s/ root@INBACRNRDL0102.workload.bos2.lab'
+  agentLabels:
+      cluster-name: "sno1"
+  pullSecretRef:
+    name: pullsecret

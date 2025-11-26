@@ -9,20 +9,26 @@ metadata:
     instance: cat-1
 spec:
   hostNetwork: false
-  hostPID: true
+  hostPID: false
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
   nodeSelector:
-    kubernetes.io/hostname: hub-ctlplane-0.5g-deployment.lab
+    kubernetes.io/hostname: ocp-sno1
   containers:
   - name: network-tools
     image: quay.io/midu/network-tools:latest
     imagePullPolicy: Always
     securityContext:
-      privileged: true
+      privileged: false
+      allowPrivilegeEscalation: false
+      runAsNonRoot: true
       capabilities:
-        add:
-        - NET_ADMIN
-        - NET_RAW
-        - SYS_ADMIN
+        drop:
+        - ALL
+      seccompProfile:
+        type: RuntimeDefault
     resources:
       limits:
         cpu: "2"
@@ -48,20 +54,26 @@ metadata:
     instance: cat-2
 spec:
   hostNetwork: false
-  hostPID: true
+  hostPID: false
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
   nodeSelector:
-    kubernetes.io/hostname: hub-ctlplane-0.5g-deployment.lab
+    kubernetes.io/hostname: ocp-sno1
   containers:
   - name: network-tools
     image: quay.io/midu/network-tools:latest
     imagePullPolicy: Always
     securityContext:
-      privileged: true
+      privileged: false
+      allowPrivilegeEscalation: false
+      runAsNonRoot: true
       capabilities:
-        add:
-        - NET_ADMIN
-        - NET_RAW
-        - SYS_ADMIN
+        drop:
+        - ALL
+      seccompProfile:
+        type: RuntimeDefault
     resources:
       limits:
         cpu: "2"
@@ -87,9 +99,13 @@ metadata:
     instance: cat-3
 spec:
   hostNetwork: false
-  hostPID: true
+  hostPID: false
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
   nodeSelector:
-    kubernetes.io/hostname: hub-ctlplane-2.5g-deployment.lab
+    kubernetes.io/hostname: ocp-sno1
   containers:
   - name: network-tools
     image: quay.io/midu/network-tools:latest

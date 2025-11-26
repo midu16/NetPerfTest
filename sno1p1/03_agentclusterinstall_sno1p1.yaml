@@ -1,0 +1,28 @@
+---
+apiVersion: extensions.hive.openshift.io/v1beta1
+kind: AgentClusterInstall
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  name: sno1
+  namespace: sno1
+spec:
+  manifestsConfigMapRef:
+    name: extra-manifests
+  clusterDeploymentRef:
+    name: sno1
+  imageSetRef:
+    name: openshift-v4.18.27-disconnected
+  networking:
+    networkType: "OVNKubernetes"
+    clusterNetwork:
+      - cidr: "10.128.0.0/14"
+        hostPrefix: 23
+    serviceNetwork:
+      - "172.30.0.0/16"
+    machineNetwork:
+      - cidr: "172.16.30.0/24"
+  provisionRequirements:
+    controlPlaneAgents: 1
+    workerAgents: 1  # This should be set to allow worker nodes for scale up the SNO1 cluster
+  sshPublicKey: 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCZ+AP2ZRIkY3xJ2XtqVM+qZXvcSn3k15aeJiDqAdDe0jYf4/m/gefmpi3Hvn4Y87bL5edyodaYCdlXf2ZcfhSyMPh7zojPFEgu3A5AlgHtSLUy2jx0TdHFTUPmfZU8fncq31qq+p2IvdJwySxYS8ubru+C1TU0u0sOOeHqxsQJQ9JiB5myXZCNV7J4Re4uUBvX+2IujwedQOfMeN21cPXQ3UIj54qwbwPENBdneS2j2x35joa+6eEvyqd1YOyF8lEaRYaNyW2lSb5Vz6a/WNHLsD/MHRxp3UkDexxrYHAIz/U/ZvUlTDW25rUmR8OcdCBPsf9mI/fGVqzqnSqiV8s/ root@INBACRNRDL0102.workload.bos2.lab'
