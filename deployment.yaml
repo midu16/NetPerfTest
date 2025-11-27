@@ -15,7 +15,7 @@ spec:
     seccompProfile:
       type: RuntimeDefault
   nodeSelector:
-    kubernetes.io/hostname: ocp-sno1
+    kubernetes.io/hostname: ocp-sno1p1
   containers:
   - name: network-tools
     image: quay.io/midu/network-tools:latest
@@ -105,7 +105,7 @@ spec:
     seccompProfile:
       type: RuntimeDefault
   nodeSelector:
-    kubernetes.io/hostname: ocp-sno1
+    kubernetes.io/hostname: ocp-sno1p1
   containers:
   - name: network-tools
     image: quay.io/midu/network-tools:latest
