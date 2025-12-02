@@ -5,6 +5,9 @@ metadata:
 spec:
   additionalKernelArgs:
   - nohz_full=2-19,22-39
+  additionalKernelRuntimeArgs:
+  - key: kernel.perf_event_paranoid
+    value: "-1"
   cpu:
     balanceIsolated: false
     isolated: 2-19,22-39

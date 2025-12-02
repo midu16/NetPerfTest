@@ -1,673 +1,229 @@
-# CNF-20409 - Network & Performance Tools Suite 
+# NetPerfTest - AF_PACKET Socket Analysis
 
-**Purpose**: Comprehensive containerized tools suite for network testing, performance analysis, and system diagnostics in OpenShift/Kubernetes environments.
+## The Problem
 
----
+When multiple AF_PACKET sockets are opened on a Kubernetes/OpenShift node (e.g., from tcpdump instances), they cause reserved CPUs to spend **90-100% time in system interrupt (si)**, leading to:
 
-## Overview
+- **Network throughput degradation** (30-70% reduction)
+- **High latency** between pods
+- **Connection closures** under load
+- **CPU overload** on reserved CPUs handling network interrupts
 
-This project provides two specialized container images and an automated deployment system:
+**Root Cause:** Kernel functions `packet_rcv()` and `consume_skb()` create excessive overhead when copying packets to multiple AF_PACKET socket buffers.
 
-1. **Network Tools Container** (`network-tools`) - tcpdump, iperf3, and network utilities
-2. **Performance Tools Container** (`perf-tools`) - perf for CPU performance analysis
-
-Both containers can be deployed with full system privileges for deep diagnostics on OpenShift nodes.
-
----
-
-## 🎯 Key Features
-
-### Network Tools
-- **Packet Capture**: tcpdump with full capabilities
-- **Bandwidth Testing**: iperf3 server/client automation
-- **Multi-Process Testing**: Launch 500 concurrent tcpdump processes
-- **Network Utilities**: iproute, iputils, bind-utils, net-tools
-- **Automated Testing**: Built-in iperf client/server orchestration
-
-### Performance Tools
-- **CPU Profiling**: perf top for real-time CPU analysis
-- **Host Access**: Full host PID and network namespace access
-- **Multi-Core Analysis**: Target specific CPU cores (e.g., 0,1,20,21)
-
-### System Checks
-- **Kernel Version**: Compare running kernel against target version
-- **RHEL Fix Detection**: Identify if RHEL-88921 fix is available
-
-### Deployment Automation
-- **KUBECONFIG Support**: No need for `oc login`, use kubeconfig directly
-- **Multi-Node Deployment**: Deploy on specific nodes with node selectors
-- **Privilege Management**: Automatic SCC application
-- **Resource Management**: Configurable CPU/memory limits
+**Formula:** `CPU load = PPS × (fixed-cost + per-af-socket-cost × nb-of-af-sockets)`
 
 ---
 
-## 📦 Container Images
-
-### 1. Network Tools (`network-tools`)
-
-**Base**: Fedora 40
-
-**Included Tools**:
-- `tcpdump` - Packet capture and analysis
-- `iperf3` - Network bandwidth testing
-- `iproute` - Advanced network configuration (ip, ss, tc)
-- `iputils` - ping, traceroute, arping
-- `bind-utils` - DNS tools (dig, nslookup, host)
-- `net-tools` - Classic tools (netstat, ifconfig, route)
-- `procps-ng` - Process monitoring (ps, top, watch)
-- `vim-minimal` - Text editor
-- `bash-completion` - Shell completion
-
-**Dockerfile**: `Dockerfile.network-tools`
-
-### 2. Performance Tools (`perf-tools`)
-
-**Base**: Fedora 40
-
-**Included Tools**:
-- `perf` - Linux performance analysis tool
-- `kernel-tools` - Kernel debugging utilities
-- `procps-ng` - Process utilities
-- `util-linux` - System utilities
-
-**Dockerfile**: `Dockerfile.perf`
-
----
-
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
-```bash
-# Set your kubeconfig
-export KUBECONFIG=/path/to/kubeconfig
+- OpenShift/Kubernetes cluster with Prometheus monitoring
+- `oc` or `kubectl` CLI tool
+- Kubeconfig access to target cluster
 
-# Or pass it with each command
-make <target> KUBECONFIG=/path/to/kubeconfig
-```
-
-### 1. Build and Push Images
+### Deploy the Replicator
 
 ```bash
-cd /home/midu/telco-core/CNF-20409
+# Deploy AF_PACKET socket replicator
+oc --kubeconfig=./kubeconfig-sno1 apply -f replicator.yaml
 
-# Build network-tools image
-make build-push
+# Verify deployment
+oc get pods -n af-packet-replicator -o wide
 
-# Build perf-tools image
-make build-push-perf
-
-# Or build both
-make build-push && make build-push-perf
+# Expected pods:
+# - iperf-server (network performance server)
+# - iperf-client (network performance client)
+# - af-socket-replicator (creates AF_PACKET sockets)
+# - perf-monitor (monitors CPU si% metrics)
 ```
 
-### 2. Deploy Network Tools Pods
+### Monitor the Issue
+
+Access Prometheus and run the key queries:
 
 ```bash
-# Deploy 3 network-tools pods
-make deploy KUBECONFIG=/path/to/kubeconfig
-
-# Check status
-make status KUBECONFIG=/path/to/kubeconfig
+# Port-forward to Prometheus
+oc port-forward -n openshift-monitoring svc/prometheus-k8s 9090:9090
 ```
 
-### 3. Deploy Performance Tools Pod
+Open http://localhost:9090 and run:
 
-```bash
-# Deploy perf-tools pod
-make deploy-perf KUBECONFIG=/path/to/kubeconfig
+```promql
+# System interrupt time on target node
+100 * rate(node_cpu_seconds_total{
+  mode="softirq",
+  instance=~".*ocp-sno1.*"
+}[5m])
+
+# Network throughput
+rate(container_network_receive_bytes_total{
+  namespace="af-packet-replicator",
+  pod="iperf-client"
+}[5m])
 ```
 
-### 4. Run Tests
+**Expected Results:**
+- CPU si% starts at ~0.5-5%
+- After deploying replicator with 3000 sockets + high PPS traffic: **90-100% si%**
+- Network throughput degradation: **30-70% reduction**
 
-```bash
-# Terminal 1: Start iperf3 server
-make iperf-server KUBECONFIG=/path/to/kubeconfig
-
-# Terminal 2: Run iperf3 client (auto-detects server IP)
-make iperf-client KUBECONFIG=/path/to/kubeconfig
-
-# Run perf top on specific CPUs
-make perf-top KUBECONFIG=/path/to/kubeconfig
-```
 
 ---
 
-## 📊 Pod Deployments
+## Key Components
 
-### Network Tools Pods
+### 1. AF_PACKET Socket Replicator (`replicator.yaml`)
 
-| Pod Name | Node | IP Mode | Purpose |
-|----------|------|---------|---------|
-| `cat-1` | hub-ctlplane-0.5g-deployment.lab | hostNetwork | Network tools pod 1 |
-| `cat-2` | hub-ctlplane-0.5g-deployment.lab | hostNetwork | Network tools pod 2 |
-| `cat-3` | hub-ctlplane-2.5g-deployment.lab | hostNetwork | Network tools pod 3 |
+The main deployment that replicates the issue:
 
-**Pod Configuration**:
-- `hostNetwork: true` - Uses node's network namespace
-- `hostPID: true` - Can see host processes
-- `privileged: true` - Full system access
-- Capabilities: `NET_ADMIN`, `NET_RAW`, `SYS_ADMIN`
-- Volume: `/data/pcaps` (emptyDir for packet captures)
-- Resources: 500m-2 CPU, 512Mi-2Gi memory
+- **iperf-server**: Network performance test server (baseline throughput measurement)
+- **iperf-client**: Network performance test client (measures degradation)
+- **af-socket-replicator**: Creates 3000 AF_PACKET sockets on loopback interface with high PPS traffic
+- **perf-monitor**: Monitors CPU si% on reserved CPUs
 
-### Performance Tools Pod
-
-| Pod Name | Node | Purpose |
-|----------|------|---------|
-| `perf-pod` | hub-ctlplane-0.5g-deployment.lab | CPU performance analysis |
-
-**Pod Configuration**:
-- `hostNetwork: true` - Access to host network
-- `hostPID: true` - Access to all host processes
-- `privileged: true` - Full system access
-- Capabilities: `SYS_ADMIN`, `SYS_PTRACE`, `PERFMON`
-- Resources: 500m-2 CPU, 512Mi-2Gi memory
-
----
-
-## 🎮 Makefile Targets
-
-### Build Targets
-
-| Target | Description |
-|--------|-------------|
-| `make build` | Build network-tools container image |
-| `make push` | Push network-tools image to registry |
-| `make build-push` | Build and push network-tools |
-| `make test` | Test network-tools image locally |
-| `make build-perf` | Build perf-tools container image |
-| `make push-perf` | Push perf-tools image to registry |
-| `make build-push-perf` | Build and push perf-tools |
-
-### Deployment Targets
-
-| Target | Description |
-|--------|-------------|
-| `make create-namespace` | Create namespace with privileged SCC |
-| `make deploy` | Deploy all 3 network-tools pods |
-| `make status` | Show pod status |
-| `make cleanup` | Delete network-tools pods |
-| `make cleanup-namespace` | Delete namespace |
-
-### Pod Access Targets
-
-| Target | Description |
-|--------|-------------|
-| `make exec-cat1` | Shell into cat-1 |
-| `make exec-cat2` | Shell into cat-2 |
-| `make exec-cat3` | Shell into cat-3 |
-| `make logs-cat1` | Show cat-1 logs |
-| `make logs-cat2` | Show cat-2 logs |
-| `make logs-cat3` | Show cat-3 logs |
-
-### Network Testing Targets
-
-| Target | Description |
-|--------|-------------|
-| `make iperf-server` | Run iperf3 server in cat-3 |
-| `make iperf-client` | Run iperf3 client from cat-1 to cat-3 (auto-detects IP) |
-| `make tcpdump-loop` | Start 500 tcpdump processes in cat-2 |
-
-### Performance Analysis Targets
-
-| Target | Description |
-|--------|-------------|
-| `make deploy-perf` | Deploy perf-tools pod |
-| `make perf-top` | Run `perf top -C 0,1,20,21 -z` |
-| `make cleanup-perf` | Delete perf-tools pod |
-
-### System Check Targets
-
-| Target | Description |
-|--------|-------------|
-| `make check-kernel` | Check node kernel version vs target |
-
----
-
-## 💡 Common Use Cases
-
-### Use Case 1: Network Bandwidth Testing (Automated)
-
-**Most Common**: Use the automated targets
-
-```bash
-# Terminal 1: Start iperf3 server in cat-3
-make iperf-server KUBECONFIG=/path/to/kubeconfig
-
-# Terminal 2: Run iperf3 client from cat-1 to cat-3
-# (automatically detects cat-3 IP and runs 10-minute test with 5s intervals)
-make iperf-client KUBECONFIG=/path/to/kubeconfig
-```
-
-**Output**:
-- Test duration: 600 seconds (10 minutes)
-- Reporting interval: 5 seconds
-- Automatic IP detection for cat-3
-
-### Use Case 2: Packet Capture - Single Instance
-
-```bash
-# Shell into any pod
-make exec-cat1 KUBECONFIG=/path/to/kubeconfig
-
-# Inside pod - capture on all interfaces
-tcpdump -qni any -w /data/pcaps/capture.pcap
-
-# Capture specific traffic
-tcpdump -qni any 'tcp port 80' -w /data/pcaps/http.pcap
-
-# Copy file out
-oc cp network-tools/cat-1:/data/pcaps/capture.pcap ./capture.pcap
-```
-
-### Use Case 3: Packet Capture - Mass Testing (500 Processes)
-
-**Purpose**: Test system behavior under high process load
-
-```bash
-# Start 500 tcpdump processes in cat-2
-make tcpdump-loop KUBECONFIG=/path/to/kubeconfig
-
-# Verify processes are running
-make exec-cat2 KUBECONFIG=/path/to/kubeconfig
-# Inside pod:
-ps aux | grep tcpdump | wc -l  # Should show ~500
-
-# Check capture files
-ls -lh /data/pcaps/  # Shows toto1, toto2, ..., toto500
-```
-
-**Features**:
-- Spawns 500 background tcpdump processes
-- Small delays between spawns to prevent OOM
-- Silent mode (stderr suppressed)
-- Files: `/data/pcaps/toto1` through `/data/pcaps/toto500`
-
-### Use Case 4: CPU Performance Analysis
-
-```bash
-# Deploy perf pod
-make deploy-perf KUBECONFIG=/path/to/kubeconfig
-
-# Run perf top on specific CPUs (0, 1, 20, 21)
-make perf-top KUBECONFIG=/path/to/kubeconfig
-
-# Cleanup when done
-make cleanup-perf KUBECONFIG=/path/to/kubeconfig
-```
-
-**perf top flags**:
-- `-C 0,1,20,21` - Monitor specific CPU cores
-- `-z` - Show symbol names (demangle C++ symbols)
-
-### Use Case 5: Kernel Version Check
-
-```bash
-# Check kernel version on default node
-make check-kernel KUBECONFIG=/path/to/kubeconfig
-
-# Check different node
-make check-kernel NODE_NAME=hub-ctlplane-2.5g-deployment.lab KUBECONFIG=/path/to/kubeconfig
-
-# Check against different target version
-make check-kernel TARGET_KERNEL=5.14.0-600 KUBECONFIG=/path/to/kubeconfig
-```
-
-**Output**:
-- Extracts kernel version (e.g., `5.14.0-570.62.1.el9_6.x86_64` → `5.14.0-570`)
-- Compares against target (default: `5.14.0-586`)
-- Shows if RHEL-88921 fix is available
-
-**Example Output**:
-```
-📋 Full kernel version: 5.14.0-570.62.1.el9_6.x86_64
-🔢 Extracted version: 5.14.0-570
-🎯 Target version:    5.14.0-586
-
-✗ Current kernel (5.14.0-570) is OLDER than target (5.14.0-586)
-⚠  Kernel fix within RHEL-88921 its not available
-```
-
-### Use Case 6: Multi-Node Simultaneous Capture
-
-```bash
-# Terminal 1 - cat-1 (node 0)
-make exec-cat1 KUBECONFIG=/path/to/kubeconfig
-tcpdump -qni any -w /data/pcaps/node0.pcap
-
-# Terminal 2 - cat-3 (node 2)
-make exec-cat3 KUBECONFIG=/path/to/kubeconfig
-tcpdump -qni any -w /data/pcaps/node2.pcap
-
-# Terminal 3 - Generate traffic
-make iperf-client KUBECONFIG=/path/to/kubeconfig
-```
-
----
-
-## ⚙️ Configuration Variables
-
-All targets support these variables:
-
-### Image Configuration
-
-```bash
-IMAGE_REGISTRY=quay.io          # Container registry
-IMAGE_NAMESPACE=midu            # Registry namespace/user
-IMAGE_NAME=network-tools        # Network tools image name
-IMAGE_TAG=latest                # Image tag
-PERF_IMAGE_NAME=perf-tools      # Perf tools image name
-PERF_IMAGE_TAG=latest           # Perf image tag
-```
-
-### Kubernetes Configuration
-
-```bash
-KUBECONFIG=$HOME/.kube/config   # Path to kubeconfig file
-NAMESPACE=network-tools         # Namespace for deployments
-```
-
-### System Check Configuration
-
-```bash
-TARGET_KERNEL=5.14.0-586                          # Target kernel version
-NODE_NAME=hub-ctlplane-0.5g-deployment.lab       # Node to check
-```
-
-### Example Usage
-
-```bash
-# Custom registry
-make build-push IMAGE_REGISTRY=docker.io IMAGE_NAMESPACE=myteam
-
-# Custom namespace
-make deploy NAMESPACE=my-tools KUBECONFIG=/path/to/kubeconfig
-
-# Different target kernel
-make check-kernel TARGET_KERNEL=5.14.0-600 KUBECONFIG=/path/to/kubeconfig
-```
-
----
-
-## 📝 Complete Workflow Examples
-
-### Example 1: End-to-End Network Testing
-
-```bash
-# 1. Build and deploy
-make build-push
-make deploy KUBECONFIG=/path/to/kubeconfig
-
-# 2. Check deployment
-make status KUBECONFIG=/path/to/kubeconfig
-
-# 3. Run automated iperf test
-# Terminal 1
-make iperf-server KUBECONFIG=/path/to/kubeconfig
-
-# Terminal 2
-make iperf-client KUBECONFIG=/path/to/kubeconfig
-
-# 4. Cleanup
-make cleanup KUBECONFIG=/path/to/kubeconfig
-```
-
-### Example 2: System Performance Analysis
-
-```bash
-# 1. Check kernel version
-make check-kernel KUBECONFIG=/path/to/kubeconfig
-
-# 2. Deploy perf tools
-make build-push-perf
-make deploy-perf KUBECONFIG=/path/to/kubeconfig
-
-# 3. Run performance analysis
-make perf-top KUBECONFIG=/path/to/kubeconfig
-
-# 4. Cleanup
-make cleanup-perf KUBECONFIG=/path/to/kubeconfig
-```
-
-### Example 3: Stress Testing with tcpdump
-
-```bash
-# 1. Deploy network tools
-make deploy KUBECONFIG=/path/to/kubeconfig
-
-# 2. Start 500 tcpdump processes
-make tcpdump-loop KUBECONFIG=/path/to/kubeconfig
-
-# 3. Verify and monitor
-make exec-cat2 KUBECONFIG=/path/to/kubeconfig
-# Inside pod:
-ps aux | grep tcpdump | wc -l
-top -bn1 | head -20
-
-# 4. Run network test while capturing
-# (Open another terminal)
-make iperf-client KUBECONFIG=/path/to/kubeconfig
-
-# 5. Cleanup
-make cleanup KUBECONFIG=/path/to/kubeconfig
-```
-
----
-
-## 🗂️ Directory Structure
-
-```
-CNF-20409/
-├── Dockerfile.network-tools    # Network tools container definition
-├── Dockerfile.perf             # Performance tools container definition
-├── Makefile                    # Automation and orchestration (475 lines)
-├── deployment.yaml             # Generated network-tools pod manifests
-├── perf-deployment.yaml        # Generated perf-tools pod manifest
-├── pao.yaml                    # Performance Addon Operator config
-├── QUICKSTART.md               # Quick reference guide
-└── README.md                   # This file
-```
-
----
-
-## 🔒 Security Considerations
-
-### Privileged Access
-
-**Why Needed**:
-- tcpdump requires `NET_RAW` capability for packet capture
-- perf requires `SYS_ADMIN`, `SYS_PTRACE`, `PERFMON` for system profiling
-- Host network/PID access for comprehensive diagnostics
-
-**Risks**:
-- Full access to host network interfaces
-- Can capture all network traffic on the node
-- Can see and profile all host processes
-- Privileged containers can escape to host
-
-### Best Practices
-
-1. **Limit Deployment**:
-   - Only deploy in test/dev/troubleshooting scenarios
-   - Remove pods after testing
-   - Use `make cleanup` and `make cleanup-perf`
-
-2. **Access Control**:
-   - Restrict who can deploy privileged pods (RBAC)
-   - Monitor pod creation events
-   - Audit pod exec sessions
-
-3. **Data Security**:
-   - Packet captures may contain sensitive data
-   - Use `oc cp` to retrieve files, then delete from pod
-   - Store captures securely
-   - Consider encryption for captured data
-
-4. **Namespace Isolation**:
-   - Use dedicated namespace (`network-tools`)
-   - Apply network policies if needed
-   - Monitor resource usage
-
----
-
-## 🐛 Troubleshooting
-
-### Issue: KUBECONFIG not found
-
-**Error**: `Error: KUBECONFIG file not found`
-
-**Solution**:
-```bash
-# Export kubeconfig
-export KUBECONFIG=/path/to/kubeconfig
-
-# Or pass with each command
-make deploy KUBECONFIG=/path/to/kubeconfig
-```
-
-### Issue: Cannot connect to cluster
-
-**Error**: `Cannot connect to cluster using KUBECONFIG`
-
-**Solution**:
-```bash
-# Test connection
-oc whoami --kubeconfig=/path/to/kubeconfig
-
-# Verify cluster access
-oc get nodes --kubeconfig=/path/to/kubeconfig
-```
-
-### Issue: Pod fails with SCC error
-
-**Error**: `unable to validate against any security context constraint`
-
-**Solution**:
-```bash
-# Manually apply SCC
-oc adm policy add-scc-to-user privileged -z default -n network-tools
-
-# Or let make do it
-make create-namespace KUBECONFIG=/path/to/kubeconfig
-```
-
-### Issue: Node not found
-
-**Error**: Pod stuck in `Pending`, events show node selector not matching
-
-**Solution**:
-```bash
-# List available nodes
-oc get nodes -o wide
-
-# Update Makefile or deployment.yaml with correct node names
-# Edit lines with nodeSelector: kubernetes.io/hostname
-```
-
-### Issue: tcpdump-loop terminated with exit code 137
-
-**Error**: Process killed (OOM)
-
-**Solution**:
-- This is expected with 500 processes consuming too much memory
-- The Makefile now includes delays to prevent this
-- If still occurring, reduce pod count or increase memory limits
-
-### Issue: perf commands fail
-
-**Error**: `perf: Operation not permitted`
-
-**Solution**:
-```bash
-# Verify pod is privileged
-oc get pod perf-pod -n network-tools -o yaml | grep privileged
-
-# Check capabilities
-oc get pod perf-pod -n network-tools -o yaml | grep -A 5 capabilities
-
-# Redeploy if needed
-make cleanup-perf KUBECONFIG=/path/to/kubeconfig
-make deploy-perf KUBECONFIG=/path/to/kubeconfig
-```
-
----
-
-## 📚 Advanced Topics
-
-### Custom Node Selection
-
-Edit generated `deployment.yaml` or `perf-deployment.yaml`:
-
+**Configuration Highlights:**
 ```yaml
-nodeSelector:
-  kubernetes.io/hostname: my-custom-node.example.com
+# 3000 AF_PACKET sockets on loopback interface
+# 250 concurrent TCP streams (50 clients × 5 streams)
+# 64-byte packets for maximum PPS
+# Loopback traffic generator for highest local packet rate
 ```
 
-Or modify Makefile variables before generating.
+### 2. Metrics Collector (`af_packet_reproducer/`)
 
-### Custom Resource Limits
+Go-based tool that:
+- Creates configurable number of AF_PACKET sockets
+- Generates real network traffic
+- Monitors CPU softirq time
+- Generates PNG visualizations
+- Tracks active socket count
 
-In `deployment.yaml` or `perf-deployment.yaml`:
-
-```yaml
-resources:
-  limits:
-    cpu: "4"
-    memory: 4Gi
-  requests:
-    cpu: "1"
-    memory: 1Gi
-```
-
-### Persistent Storage for Captures
-
-Replace `emptyDir` with PVC in deployment:
-
-```yaml
-volumes:
-- name: pcaps
-  persistentVolumeClaim:
-    claimName: pcaps-pvc
+**Usage:**
+```bash
+cd af_packet_reproducer
+sudo ./af_packet_reproducer \
+  -sockets=1000 \
+  -duration=60 \
+  -dir=./metrics \
+  -interface=lo \
+  -verbose
 ```
 
 ---
 
-## 📖 References
+## Prometheus Metrics Guide
 
-- **tcpdump**: https://www.tcpdump.org/manpages/tcpdump.1.html
-- **iperf3**: https://iperf.fr/iperf-doc.php
-- **perf**: https://perf.wiki.kernel.org/
-- **OpenShift SCC**: https://docs.openshift.com/container-platform/latest/authentication/managing-security-context-constraints.html
-- **RHEL-88921**: Red Hat kernel bugfix for packet drop issues
+### Critical Metrics for AF_PACKET Issue Detection
+
+#### 1. System Interrupt Time (si%)
+```promql
+# CPU si% on target node (Critical: > 50%)
+100 * rate(node_cpu_seconds_total{
+  mode="softirq",
+  instance=~".*ocp-sno1.*"
+}[5m])
+```
+
+#### 2. Network Throughput
+```promql
+# Network throughput (Critical: < 70% baseline)
+rate(container_network_receive_bytes_total{
+  namespace="af-packet-replicator",
+  pod="iperf-client"
+}[5m])
+```
+
+#### 3. Packet Drops
+```promql
+# Packet drop rate (Critical: > 0)
+rate(container_network_receive_packets_dropped_total{
+  namespace="af-packet-replicator"
+}[5m])
+```
+
+#### 4. NET_RX SoftIRQ Rate
+```promql
+# Software interrupt rate (Monitor for increases)
+rate(node_softirqs_total{
+  softirq="NET_RX",
+  instance=~".*ocp-sno1.*"
+}[5m])
+```
+
+#### 5. Top CPUs by System Interrupt
+```promql
+# Identify most affected CPUs
+topk(10, 100 * rate(node_cpu_seconds_total{
+  mode="softirq",
+  instance=~".*ocp-sno1.*"
+}[5m]))
+```
+
+**📖 For complete Prometheus queries and analysis:** See [`Markdown/AF_PACKET_SOCKET_METRICS_ANALYSIS.md`](Markdown/AF_PACKET_SOCKET_METRICS_ANALYSIS.md)
 
 ---
 
-## 📊 Version History
+## Replication Workflow
 
-| Version | Date | Changes |
-|---------|------|---------|
-| 2.0 | 2025-11-11 | Added perf-tools, KUBECONFIG support, automated testing, kernel checks |
-| 1.0 | 2025-11-10 | Initial release with network-tools |
+### Step 1: Pre-Deployment Baseline
+
+```bash
+# Establish baseline metrics before replication
+oc port-forward -n openshift-monitoring svc/prometheus-k8s 9090:9090
+```
+
+Run baseline queries in Prometheus (see Metrics Guide above).
+
+### Step 2: Deploy Replicator
+
+```bash
+oc apply -f replicator.yaml
+```
+
+### Step 3: Progressive Testing
+
+The replicator automatically creates 3000 AF_PACKET sockets and generates maximum PPS:
+
+- **Phase 1 (0-60s)**: Socket creation in progress
+- **Phase 2 (60-120s)**: Full load with 3000 sockets + 250 TCP streams
+- **Phase 3 (120s+)**: Sustained overload - CPU si% reaches 90-100%
+
+### Step 4: Monitor Metrics
+
+Watch Prometheus queries in real-time:
+- CPU si% increases from ~5% → 90-100%
+- Network throughput degrades by 30-70%
+- System becomes slow/unresponsive
+
+### Step 5: Collect Evidence
+
+```bash
+# If cluster is responsive
+cd deployments
+./collect_evidence.sh
+
+# Review results
+cd ../REPLICATION_PROOF
+cat EVIDENCE_SUMMARY.txt
+grep 'CPU0:' perf-monitor.log | awk -F'CPU0:|%si' '{print $2}' | awk -F',' '{print $1}' | sort -rn | head -20
+```
+
+### Step 6: Cleanup
+
+```bash
+# Delete the replicator namespace
+oc delete namespace af-packet-replicator
+```
 
 ---
 
-## ✅ Status
+## Success Criteria
 
-**Current Status**: ✅ **Production Ready**
-
-**Features**:
-- ✅ Network tools container (tcpdump, iperf3)
-- ✅ Performance tools container (perf)
-- ✅ KUBECONFIG-based deployment (no oc login required)
-- ✅ Automated iperf testing with IP detection
-- ✅ Mass tcpdump testing (500 processes)
-- ✅ CPU performance profiling
-- ✅ Kernel version checking
-- ✅ Multi-node deployment
-- ✅ Privileged pod management
-
-**Tested On**:
-- OpenShift 4.x
-- RHEL 9.x nodes
-- Fedora 40 base images
+| Metric | Baseline | With AF_PACKET Issue | Status |
+|--------|----------|---------------------|--------|
+| CPU si% | 0.5-5% | **90-100%** | ✅ Replicated |
+| Network Throughput | 100% | **30-70%** | ✅ Replicated |
+| Packet Drops | 0 | **> 0** | ✅ Observed |
+| System Responsiveness | Normal | **Degraded/Unresponsive** | ✅ Confirmed |

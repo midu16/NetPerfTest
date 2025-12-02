@@ -1,0 +1,542 @@
+---
+# Replicator deployment for AF_PACKET socket issue
+# Based on Airtel case 04076665
+# 
+# Purpose: Replicate the af_packet socket performance degradation issue
+# Steps:
+# 1. Deploy iperf server and client on same/different nodes
+# 2. Measure baseline throughput with perf monitoring
+# 3. Start tcpdump replicator pod with multiple af_packet sockets
+# 4. Observe performance degradation in perf and iperf throughput
+#
+
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: af-packet-replicator
+  labels:
+    name: af-packet-replicator
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: system:openshift:scc:privileged
+  namespace: af-packet-replicator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:openshift:scc:privileged
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: af-packet-replicator
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: iperf-server
+  namespace: af-packet-replicator
+  labels:
+    app: iperf-server
+    role: server
+spec:
+  hostNetwork: false
+  hostPID: false
+  nodeSelector:
+    # Deploy on target node - update as needed
+    kubernetes.io/hostname: ocp-sno1
+  containers:
+  - name: iperf-server
+    image: infra.5g-deployment.lab:8443/midu/fedora:latest
+    imagePullPolicy: Always
+    command:
+    - /bin/bash
+    - -c
+    - |
+      echo "Installing iperf3..."
+      dnf install -y iperf3 2>&1 | tail -5
+      echo "Starting iperf3 server (HIGH-LOAD mode)..."
+      MY_IP=$(ip addr show eth0 | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
+      echo "Server IP: $MY_IP"
+      echo "Ready to handle multiple parallel streams"
+      iperf3 -s -p 5201
+    ports:
+    - containerPort: 5201
+      name: iperf
+      protocol: TCP
+    resources:
+      limits:
+        cpu: "4"
+        memory: 4Gi
+      requests:
+        cpu: "2"
+        memory: 2Gi
+  restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: iperf-server
+  namespace: af-packet-replicator
+spec:
+  selector:
+    app: iperf-server
+  ports:
+  - protocol: TCP
+    port: 5201
+    targetPort: 5201
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: iperf-client
+  namespace: af-packet-replicator
+  labels:
+    app: iperf-client
+    role: client
+spec:
+  hostNetwork: false
+  hostPID: false
+  nodeSelector:
+    # Deploy on same or different node - update as needed
+    kubernetes.io/hostname: ocp-sno1p1
+  containers:
+  - name: iperf-client
+    image: infra.5g-deployment.lab:8443/midu/fedora:latest
+    imagePullPolicy: Always
+    command:
+    - /bin/bash
+    - -c
+    - |
+      echo "Installing iperf3..."
+      dnf install -y iperf3 2>&1 | tail -5
+      echo "Waiting for iperf server to be ready..."
+      sleep 20
+      echo "iperf server should be ready. Starting EXTREME HIGH-LOAD client..."
+      echo "Running continuous iperf3 test with MAXIMUM PPS..."
+      echo "Parameters: 50 parallel TCP streams, 128-byte packets"
+      while true; do
+        # EXTREME load iperf test to maximize PPS (packets per second)
+        # -P 50 = 50 parallel TCP streams for massive packet rate
+        # -l 128 = 128-byte packets (very small) for maximum packet count
+        # TCP mode (more stable than UDP for many streams)
+        # Each stream will push as hard as possible
+        iperf3 -c iperf-server.af-packet-replicator.svc.cluster.local -p 5201 \
+          -t 300 -i 10 -P 50 -l 128 || true
+        echo "Test completed. Restarting in 2 seconds..."
+        sleep 2
+      done
+    resources:
+      limits:
+        cpu: "4"
+        memory: 4Gi
+      requests:
+        cpu: "2"
+        memory: 2Gi
+  restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: af-socket-replicator
+  namespace: af-packet-replicator
+  labels:
+    app: af-socket-replicator
+    role: replicator
+spec:
+  hostNetwork: true
+  hostPID: true
+  nodeSelector:
+    # Deploy on same node as iperf-server or iperf-client
+    kubernetes.io/hostname: ocp-sno1
+  containers:
+  - name: tcpdump-replicator
+    image: infra.5g-deployment.lab:8443/midu/fedora:latest
+    imagePullPolicy: Always
+    command:
+    - /bin/bash
+    - -c
+    - |
+      #!/bin/bash
+      
+      echo "Installing tcpdump and iperf3..."
+      dnf install -y tcpdump procps-ng iperf3 2>&1 | tail -10
+      
+      echo "============================================================"
+      echo "AF_PACKET Socket Replicator - LOOPBACK HIGH-PPS MODE"
+      echo "Target: Replicate Airtel Case 04076665"
+      echo "Strategy: Generate massive loopback traffic + AF_PACKET sockets"
+      echo "============================================================"
+      echo ""
+      
+      PCAP_DIR="/data/pcaps"
+      MAX_USAGE_PERCENT=80
+      SOCKET_COUNT=3000  # Increased to 3000 sockets
+      
+      # Function to check disk usage (without awk)
+      check_disk_usage() {
+        df "$PCAP_DIR" | tail -1 | grep -oE '[0-9]+%' | sed 's/%//'
+      }
+      
+      # Function to cleanup old files when reaching threshold
+      cleanup_old_files() {
+        local current_usage=$(check_disk_usage)
+        if [ "$current_usage" -ge "$MAX_USAGE_PERCENT" ]; then
+          echo "⚠️  Storage at ${current_usage}% - Starting cleanup..."
+          
+          # Remove oldest files until we're below 70%
+          while [ $(check_disk_usage) -ge 70 ]; do
+            oldest_file=$(ls -t "$PCAP_DIR"/*.pcap 2>/dev/null | tail -1)
+            if [ -n "$oldest_file" ]; then
+              rm -f "$oldest_file"
+            else
+              break
+            fi
+          done
+          
+          echo "✓ Cleanup complete. Current usage: $(check_disk_usage)%"
+        fi
+      }
+      
+      # Start loopback iperf servers in background to generate traffic
+      echo "🚀 Starting 10 iperf3 servers on loopback (ports 5301-5310)..."
+      for port in $(seq 5301 5310); do
+        (iperf3 -s -p $port >/dev/null 2>&1 &)
+      done
+      sleep 2
+      
+      # Start iperf clients to generate massive loopback traffic
+      echo "🚀 Starting 50 iperf3 clients to generate MASSIVE loopback PPS..."
+      for i in $(seq 1 50); do
+        port=$((5301 + (i % 10)))
+        # Use very small packets (64 bytes) and multiple streams for maximum PPS
+        (iperf3 -c 127.0.0.1 -p $port -t 99999 -l 64 -P 5 >/dev/null 2>&1 &)
+      done
+      sleep 5
+      
+      # Function to get CPU softirq time for reserved CPUs (0,1,20,21)
+      get_reserved_cpu_si() {
+        local cpu=$1
+        grep "^cpu$cpu " /proc/stat | awk '{printf "%.1f", $7/($2+$3+$4+$5+$6+$7+$8+$9)*100}'
+      }
+      
+      # Create AF_PACKET sockets immediately
+      echo "🚀 Creating $SOCKET_COUNT AF_PACKET sockets (AGGRESSIVE MODE)..."
+      echo "This will trigger high CPU softirq (si) load on reserved CPUs"
+      echo "Target: 90-100% si% on CPUs 0, 1, 20, 21"
+      echo ""
+      
+      for i in $(seq 1 $SOCKET_COUNT); do
+        # Cleanup if needed
+        cleanup_old_files
+        
+        # Start tcpdump (creates AF_PACKET socket)
+        # Capture on loopback where all the high-PPS traffic is
+        (tcpdump -qnni lo -w "$PCAP_DIR/capture_${i}.pcap" 2>/dev/null &)
+        
+        # Progress indicator every 200 sockets
+        if [ $((i % 200)) -eq 0 ]; then
+          local active=$(ps aux | grep tcpdump | grep -v grep | wc -l)
+          echo "  Created: $i/$SOCKET_COUNT | Active: $active | Disk: $(check_disk_usage)%"
+          sleep 0.3
+        fi
+      done
+      
+      echo ""
+      echo "✅ Socket creation complete!"
+      local final_active=$(ps aux | grep tcpdump | grep -v grep | wc -l)
+      echo "   Active sockets: $final_active"
+      echo "   Disk usage: $(check_disk_usage)%"
+      echo ""
+      
+      # Create monitoring scripts
+      cat > /usr/local/bin/monitor-si << 'MONSI'
+      #!/bin/bash
+      # Monitor system interrupt (si) time on reserved CPUs
+      echo "Monitoring Reserved CPU System Interrupt Time"
+      echo "=============================================="
+      echo "Target CPUs: 0, 1, 20, 21 (reserved CPUs)"
+      echo "Expected: 90-100% si time when issue is triggered"
+      echo ""
+      
+      while true; do
+        echo -n "[$(date '+%H:%M:%S')] "
+        
+        # Get si% for each reserved CPU
+        for cpu in 0 1 20 21; do
+          si=$(grep "^cpu$cpu " /proc/stat | awk '{sum=$2+$3+$4+$5+$6+$7+$8+$9; if(sum>0) printf "%.1f", $7/sum*100; else print "0.0"}')
+          echo -n "CPU$cpu:${si}%si "
+        done
+        
+        # Get overall si%
+        overall_si=$(grep "^cpu " /proc/stat | awk '{sum=$2+$3+$4+$5+$6+$7+$8+$9; if(sum>0) printf "%.1f", $7/sum*100; else print "0.0"}')
+        echo "| Overall:${overall_si}%si"
+        
+        sleep 2
+      done
+      MONSI
+      chmod +x /usr/local/bin/monitor-si
+      
+      cat > /usr/local/bin/status << 'STATUS'
+      #!/bin/bash
+      echo "=== AF_PACKET Socket Status ==="
+      echo "Active tcpdump processes: $(ps aux | grep tcpdump | grep -v grep | wc -l)"
+      echo ""
+      echo "Storage usage:"
+      df -h /data/pcaps
+      echo ""
+      echo "Capture files: $(ls -1 /data/pcaps/*.pcap 2>/dev/null | wc -l)"
+      echo "Total size: $(du -sh /data/pcaps 2>/dev/null | cut -f1)"
+      echo ""
+      echo "=== Reserved CPU System Interrupt Time ==="
+      for cpu in 0 1 20 21; do
+        si=$(grep "^cpu$cpu " /proc/stat | awk '{sum=$2+$3+$4+$5+$6+$7+$8+$9; if(sum>0) printf "%.1f", $7/sum*100; else print "0.0"}')
+        echo "CPU $cpu: ${si}% si"
+      done
+      STATUS
+      chmod +x /usr/local/bin/status
+      
+      cat > /usr/local/bin/cleanup << 'CLEANUP'
+      #!/bin/bash
+      echo "Stopping all tcpdump processes..."
+      pkill -9 tcpdump
+      echo "✓ Cleanup complete"
+      echo "Active: $(ps aux | grep tcpdump | grep -v grep | wc -l)"
+      CLEANUP
+      chmod +x /usr/local/bin/cleanup
+      
+      cat > /usr/local/bin/add-more-sockets << 'ADDMORE'
+      #!/bin/bash
+      COUNT=${1:-100}
+      echo "Adding $COUNT more sockets..."
+      START=$(ls -1 /data/pcaps/*.pcap 2>/dev/null | wc -l)
+      START=$((START + 1))
+      END=$((START + COUNT - 1))
+      
+      for i in $(seq $START $END); do
+        (tcpdump -qnni any -w /data/pcaps/capture_${i}.pcap 2>/dev/null &)
+        [ $((i % 50)) -eq 0 ] && sleep 0.5
+      done
+      
+      echo "✓ Added $COUNT sockets"
+      echo "Active: $(ps aux | grep tcpdump | grep -v grep | wc -l)"
+      ADDMORE
+      chmod +x /usr/local/bin/add-more-sockets
+      
+      echo "============================================================"
+      echo "✅ AF_PACKET Replicator Ready"
+      echo "============================================================"
+      echo ""
+      echo "Active sockets: $final_active"
+      echo ""
+      echo "💡 Available commands:"
+      echo "  monitor-si         - Monitor reserved CPU si% in real-time"
+      echo "  status             - Show socket count and CPU si%"
+      echo "  add-more-sockets N - Add N more sockets (default: 100)"
+      echo "  cleanup            - Stop all tcpdump processes"
+      echo ""
+      echo "🔍 To verify the issue is replicated:"
+      echo "  1. Run: monitor-si"
+      echo "  2. Look for CPU 0,1,20,21 with 90-100% si time"
+      echo "  3. Check iperf throughput degradation"
+      echo ""
+      echo "Starting automatic monitoring..."
+      monitor-si
+    volumeMounts:
+    - name: pcaps
+      mountPath: /data/pcaps
+    resources:
+      limits:
+        cpu: "4"
+        memory: 4Gi
+      requests:
+        cpu: "1"
+        memory: 1Gi
+    securityContext:
+      privileged: true
+      capabilities:
+        add:
+        - NET_ADMIN
+        - NET_RAW
+        - SYS_ADMIN
+  volumes:
+  - name: pcaps
+    emptyDir:
+      sizeLimit: 100Gi  # Increased for 2500 sockets
+  restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: perf-monitor
+  namespace: af-packet-replicator
+  labels:
+    app: perf-monitor
+    role: monitor
+spec:
+  hostNetwork: true
+  hostPID: true
+  nodeSelector:
+    # Deploy on same node as af-socket-replicator
+    kubernetes.io/hostname: ocp-sno1
+  containers:
+  - name: perf-tools
+    image: infra.5g-deployment.lab:8443/midu/fedora:latest
+    imagePullPolicy: Always
+    command:
+    - /bin/bash
+    - -c
+    - |
+      echo "Installing monitoring tools..."
+      dnf install -y perf procps-ng htop sysstat 2>&1 | tail -10
+      
+      echo "============================================================"
+      echo "Perf Monitor + CPU Softirq Tracker"
+      echo "Target: Measure reserved CPU system interrupt (si) time"
+      echo "============================================================"
+      echo ""
+      echo "Reserved CPUs: 0, 1, 20, 21"
+      echo "Expected when issue is triggered: 90-100% si time"
+      echo ""
+      
+      # Create monitoring script that tracks si% over time
+      cat > /usr/local/bin/track-cpu-si << 'TRACKSI'
+      #!/bin/bash
+      LOG_FILE="/data/cpu_si_tracking.log"
+      echo "Timestamp,CPU0_si%,CPU1_si%,CPU20_si%,CPU21_si%,Overall_si%" > $LOG_FILE
+      
+      echo "Tracking CPU softirq time to $LOG_FILE"
+      echo "Reserved CPUs: 0, 1, 20, 21"
+      echo "Logging every 5 seconds..."
+      echo ""
+      
+      # Previous values for rate calculation
+      declare -A prev_si
+      declare -A prev_total
+      
+      while true; do
+        timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+        
+        # Read current values
+        si_values=""
+        for cpu in 0 1 20 21; do
+          # Read /proc/stat for this CPU
+          read cpu_name user nice system idle iowait irq softirq steal guest guest_nice < <(grep "^cpu$cpu " /proc/stat)
+          
+          # Calculate si% = softirq / (total ticks) * 100
+          total=$((user + nice + system + idle + iowait + irq + softirq + steal))
+          
+          if [ -n "${prev_total[$cpu]}" ]; then
+            delta_si=$((softirq - prev_si[$cpu]))
+            delta_total=$((total - prev_total[$cpu]))
+            
+            if [ $delta_total -gt 0 ]; then
+              si_percent=$(awk "BEGIN {printf \"%.2f\", ($delta_si / $delta_total) * 100}")
+            else
+              si_percent="0.00"
+            fi
+          else
+            si_percent="0.00"
+          fi
+          
+          prev_si[$cpu]=$softirq
+          prev_total[$cpu]=$total
+          
+          si_values="$si_values,$si_percent"
+        done
+        
+        # Overall CPU si%
+        read cpu_name user nice system idle iowait irq softirq steal guest guest_nice < <(grep "^cpu " /proc/stat)
+        total=$((user + nice + system + idle + iowait + irq + softirq + steal))
+        
+        if [ -n "${prev_total[all]}" ]; then
+          delta_si=$((softirq - prev_si[all]))
+          delta_total=$((total - prev_total[all]))
+          
+          if [ $delta_total -gt 0 ]; then
+            overall_si=$(awk "BEGIN {printf \"%.2f\", ($delta_si / $delta_total) * 100}")
+          else
+            overall_si="0.00"
+          fi
+        else
+          overall_si="0.00"
+        fi
+        
+        prev_si[all]=$softirq
+        prev_total[all]=$total
+        
+        # Log to file
+        echo "$timestamp$si_values,$overall_si" >> $LOG_FILE
+        
+        # Display on screen
+        echo "[$(date '+%H:%M:%S')] CPU0:${si_values#,}%  Overall:${overall_si}%"
+        
+        sleep 5
+      done
+      TRACKSI
+      chmod +x /usr/local/bin/track-cpu-si
+      
+      cat > /usr/local/bin/show-cpu-summary << 'SUMMARY'
+      #!/bin/bash
+      echo "=== CPU Softirq Summary ==="
+      if [ -f /data/cpu_si_tracking.log ]; then
+        tail -20 /data/cpu_si_tracking.log | column -t -s','
+        echo ""
+        echo "Average si% (last 20 samples):"
+        tail -20 /data/cpu_si_tracking.log | tail -n +2 | awk -F',' '{
+          cpu0+=$2; cpu1+=$3; cpu20+=$4; cpu21+=$5; overall+=$6; count++
+        } END {
+          if(count>0) {
+            printf "CPU0: %.2f%%, CPU1: %.2f%%, CPU20: %.2f%%, CPU21: %.2f%%, Overall: %.2f%%\n", 
+              cpu0/count, cpu1/count, cpu20/count, cpu21/count, overall/count
+          }
+        }'
+      else
+        echo "No tracking data yet. Run 'track-cpu-si' first."
+      fi
+      SUMMARY
+      chmod +x /usr/local/bin/show-cpu-summary
+      
+      echo "Available commands:"
+      echo "  track-cpu-si       - Start tracking CPU si% to log file"
+      echo "  show-cpu-summary   - Show average si% from tracking log"
+      echo "  perf top -C 0,1,20,21 -z  - Live kernel function profiling"
+      echo "  check-perf-access  - Check if perf will work"
+      echo "  htop               - Interactive process viewer"
+      echo "  mpstat 1           - Per-CPU statistics"
+      echo ""
+      echo "Starting automatic CPU si% tracking..."
+      track-cpu-si
+    volumeMounts:
+    - name: metrics
+      mountPath: /data
+    resources:
+      limits:
+        cpu: "2"
+        memory: 2Gi
+      requests:
+        cpu: "500m"
+        memory: 512Mi
+    securityContext:
+      privileged: true
+      capabilities:
+        add:
+        - SYS_ADMIN
+        - SYS_PTRACE
+        - PERFMON
+  volumes:
+  - name: metrics
+    emptyDir:
+      sizeLimit: 1Gi
+  restartPolicy: Always

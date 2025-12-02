@@ -1,0 +1,39 @@
+# Binaries
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go
+vendor/
+*.test
+*.out
+go.work
+
+# Generated files
+*.png
+*.jpg
+*.pcap
+af_packet_reproducer/metrics/
+packet-analyzer/metrics/*.png
+af_packet_reproducer/af_packet_reproducer
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp
