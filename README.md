@@ -22,7 +22,11 @@ When multiple AF_PACKET sockets are opened on a Kubernetes/OpenShift node (e.g.,
 - OpenShift/Kubernetes cluster with Prometheus monitoring
 - `oc` or `kubectl` CLI tool
 - Kubeconfig access to target cluster
+- Ensure that the base OCI image its made available to your environment: 
 
+```bash
+skopeo copy --dest-tls-verify=false --dest-creds=$USERNAME:$PASSOWRD docker://registry.fedoraproject.org/fedora:latest docker://infra.5g-deployment.lab:8443/midu/fedora:latest 2>&1
+```
 ### Deploy the Replicator
 
 ```bash
