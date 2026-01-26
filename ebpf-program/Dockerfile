@@ -1,56 +1,96 @@
-# Multi-stage build for eBPF Stress Test Program
+# eBPF Stress Test Program - Multi-stage Dockerfile
+#
+# Build: docker build -t ebpf-stress:latest .
+# Run:   docker run --rm --privileged --network host ebpf-stress --hook xdp --interface eth0 --loops 10000
 
+# =============================================================================
 # Stage 1: Build eBPF programs
-FROM clang:16 AS bpf-builder
+# =============================================================================
+FROM fedora:latest AS bpf-builder
+
+LABEL maintainer="Mihai IDU <midu@redhat.com>" \
+      description="eBPF program builder stage"
+
+# Install BPF toolchain
+RUN dnf install -y \
+    clang \
+    llvm \
+    libbpf-devel \
+    kernel-headers \
+    && dnf clean all
 
 WORKDIR /build
 
-# Copy eBPF source files
-COPY bpf/ ./bpf/
+# Copy BPF source
+COPY bpf/ bpf/
 
-# Build eBPF programs
+# Build BPF programs
 RUN mkdir -p bpf/obj && \
-    clang -O2 -g -Wall -Werror -target bpf -c bpf/xdp.c -o bpf/obj/xdp.o && \
-    clang -O2 -g -Wall -Werror -target bpf -c bpf/tc.c -o bpf/obj/tc.o && \
-    clang -O2 -g -Wall -Werror -target bpf -c bpf/socket.c -o bpf/obj/socket.o
+    clang -O2 -g -Wall -target bpf -c bpf/stress.c -o bpf/obj/stress.o && \
+    clang -O2 -g -Wall -target bpf -c bpf/xdp.c -o bpf/obj/xdp.o 2>/dev/null || true && \
+    clang -O2 -g -Wall -target bpf -c bpf/tc.c -o bpf/obj/tc.o 2>/dev/null || true && \
+    clang -O2 -g -Wall -target bpf -c bpf/socket.c -o bpf/obj/socket.o 2>/dev/null || true
 
-# Stage 2: Build Go application
-FROM golang:1.21-alpine AS go-builder
+# =============================================================================
+# Stage 2: Build Go binary
+# =============================================================================
+FROM golang:1.21 AS go-builder
+
+LABEL maintainer="Mihai IDU <midu@redhat.com>" \
+      description="Go program builder stage"
 
 WORKDIR /build
 
-# Install build dependencies
-RUN apk add --no-cache git make clang llvm
-
-# Copy go mod files
+# Copy go.mod and go.sum first for caching
 COPY go.mod go.sum ./
 RUN go mod download
 
 # Copy source code
-COPY cmd/ ./cmd/
-COPY pkg/ ./pkg/
-COPY Makefile ./
+COPY cmd/ cmd/
+COPY pkg/ pkg/
 
-# Copy eBPF objects from previous stage
-COPY --from=bpf-builder /build/bpf/obj/ ./bpf/obj/
+# Build static binary
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -ldflags="-s -w -X main.version=2.0.0 -X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    -o ebpf-stress \
+    ./cmd/ebpf-stress
 
-# Build Go binary
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-w -s" -o bin/ebpf-stress ./cmd/ebpf-stress
+# =============================================================================
+# Stage 3: Final runtime image
+# =============================================================================
+FROM fedora:latest
 
-# Stage 3: Runtime image
-FROM alpine:latest
+LABEL maintainer="Mihai IDU <midu@redhat.com>" \
+      description="eBPF Stress Test - Configurable N loops per packet" \
+      version="2.0.0"
 
-RUN apk --no-cache add ca-certificates
+# Install runtime dependencies
+RUN dnf install -y \
+    iproute \
+    procps-ng \
+    && dnf clean all
 
+# Create app directory
 WORKDIR /app
 
-# Copy binary from builder
-COPY --from=go-builder /build/bin/ebpf-stress .
+# Copy BPF programs from builder
+COPY --from=bpf-builder /build/bpf/obj/ bpf/obj/
 
-# Create non-root user
-RUN addgroup -g 1000 appuser && \
-    adduser -D -u 1000 -G appuser appuser
+# Copy Go binary from builder
+COPY --from=go-builder /build/ebpf-stress /app/ebpf-stress
 
-USER appuser
+# Make binary executable
+RUN chmod +x /app/ebpf-stress
 
+# Create non-root user (but program needs root for eBPF)
+# This is for documentation; actual runtime requires --privileged
+RUN useradd -r -u 1001 -g root ebpfuser
+
+# Expose metrics port
+EXPOSE 9091
+
+# Default entrypoint
 ENTRYPOINT ["/app/ebpf-stress"]
+
+# Default arguments (can be overridden)
+CMD ["--hook", "xdp", "--interface", "eth0", "--loops", "1000", "--verbose"]

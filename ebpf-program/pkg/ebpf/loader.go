@@ -1,3 +1,14 @@
+/*
+Package ebpf provides the eBPF program loader and manager.
+
+This package handles loading, attaching, and detaching eBPF programs
+for the stress test application. It supports multiple hook types:
+  - XDP (eXpress Data Path)
+  - TC (Traffic Control) ingress/egress
+  - Socket filters
+
+The loader manages eBPF maps for configuration and statistics collection.
+*/
 package ebpf
 
 import (
@@ -10,16 +21,17 @@ import (
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 // HookType represents the type of eBPF hook
 type HookType string
 
 const (
-	HookXDP        HookType = "xdp"
-	HookTCIngress  HookType = "tc-ingress"
-	HookTCEgress   HookType = "tc-egress"
-	HookSocket     HookType = "socket"
+	HookXDP       HookType = "xdp"
+	HookTCIngress HookType = "tc-ingress"
+	HookTCEgress  HookType = "tc-egress"
+	HookSocket    HookType = "socket"
 )
 
 // Config holds the configuration for the eBPF program loader
@@ -34,7 +46,10 @@ type Config struct {
 type Stats struct {
 	PacketsProcessed uint64
 	TotalLoops       uint64
+	TotalBytes       uint64
+	TotalTimeNs      uint64
 	LoopsPerPacket   float64
+	AvgTimePerPacket float64
 }
 
 // Loader manages the lifecycle of eBPF programs
@@ -44,16 +59,27 @@ type Loader struct {
 	xdpLink    link.Link
 	tcLink     interface{} // TC uses netlink, not link.Link
 	socketLink link.Link
-	loopMap    *ebpf.Map
-	tcIface    *netlink.Link // Store interface for TC cleanup
-	tcIngress  bool          // Track if TC is ingress or egress
+	
+	// Maps for configuration
+	loopCountMap *ebpf.Map
+	enabledMap   *ebpf.Map
+	
+	// Maps for statistics
+	packetsMap *ebpf.Map
+	loopsMap   *ebpf.Map
+	bytesMap   *ebpf.Map
+	timeMap    *ebpf.Map
+	
+	// TC-specific state
+	tcIface   *netlink.Link
+	tcIngress bool
 }
 
 // NewLoader creates a new eBPF program loader
 func NewLoader(config *Config) *Loader {
 	if config.Program == "" {
-		// Default to compiled object file
-		config.Program = "bpf/obj/xdp.o"
+		// Default to stress.o which contains all programs
+		config.Program = "bpf/obj/stress.o"
 	}
 	return &Loader{
 		config: config,
@@ -67,21 +93,8 @@ func (l *Loader) LoadAndAttach() error {
 		return fmt.Errorf("failed to remove memlock limit: %w", err)
 	}
 
-	// Load eBPF program based on hook type
-	var spec *ebpf.CollectionSpec
-	var err error
-
-	switch l.config.Hook {
-	case HookXDP:
-		spec, err = LoadXDPCollection()
-	case HookTCIngress, HookTCEgress:
-		spec, err = LoadTCCollection()
-	case HookSocket:
-		spec, err = LoadSocketCollection()
-	default:
-		return fmt.Errorf("unsupported hook type: %s", l.config.Hook)
-	}
-
+	// Load eBPF program
+	spec, err := l.loadSpec()
 	if err != nil {
 		return fmt.Errorf("failed to load eBPF spec: %w", err)
 	}
@@ -93,19 +106,43 @@ func (l *Loader) LoadAndAttach() error {
 	}
 	l.collection = coll
 
-	// Get maps
-	l.loopMap = coll.Maps["loop_count_map"]
-	// Note: stats maps are now separate (packets_processed_map, total_loops_map)
-	// We'll access them directly when needed
+	// Get configuration maps
+	l.loopCountMap = coll.Maps["config_loop_count"]
+	l.enabledMap = coll.Maps["config_enabled"]
+	
+	// Get statistics maps
+	l.packetsMap = coll.Maps["stats_packets"]
+	l.loopsMap = coll.Maps["stats_loops"]
+	l.bytesMap = coll.Maps["stats_bytes"]
+	l.timeMap = coll.Maps["stats_time_ns"]
 
-	if l.loopMap == nil {
-		return fmt.Errorf("loop_count_map not found")
+	// Fallback to old map names for backwards compatibility
+	if l.loopCountMap == nil {
+		l.loopCountMap = coll.Maps["loop_count_map"]
+	}
+	if l.packetsMap == nil {
+		l.packetsMap = coll.Maps["packets_processed_map"]
+	}
+	if l.loopsMap == nil {
+		l.loopsMap = coll.Maps["total_loops_map"]
+	}
+
+	if l.loopCountMap == nil {
+		return fmt.Errorf("loop count map not found in eBPF program")
 	}
 
 	// Set loop count
 	key := uint32(0)
-	if err := l.loopMap.Put(key, l.config.Loops); err != nil {
+	if err := l.loopCountMap.Put(key, l.config.Loops); err != nil {
 		return fmt.Errorf("failed to set loop count: %w", err)
+	}
+
+	// Enable the program
+	if l.enabledMap != nil {
+		enabled := uint32(1)
+		if err := l.enabledMap.Put(key, enabled); err != nil {
+			return fmt.Errorf("failed to enable program: %w", err)
+		}
 	}
 
 	// Attach program
@@ -115,6 +152,20 @@ func (l *Loader) LoadAndAttach() error {
 	}
 
 	return nil
+}
+
+// loadSpec loads the eBPF collection spec from file
+func (l *Loader) loadSpec() (*ebpf.CollectionSpec, error) {
+	switch l.config.Hook {
+	case HookXDP:
+		return LoadXDPCollection()
+	case HookTCIngress, HookTCEgress:
+		return LoadTCCollection()
+	case HookSocket:
+		return LoadSocketCollection()
+	default:
+		return nil, fmt.Errorf("unsupported hook type: %s", l.config.Hook)
+	}
 }
 
 // attachProgram attaches the eBPF program to the appropriate hook
@@ -137,7 +188,7 @@ func (l *Loader) attachProgram() error {
 func (l *Loader) attachXDP() error {
 	prog := l.collection.Programs["xdp_stress_prog"]
 	if prog == nil {
-		return fmt.Errorf("xdp_stress_prog not found")
+		return fmt.Errorf("xdp_stress_prog not found in eBPF collection")
 	}
 
 	iface, err := netlink.LinkByName(l.config.Interface)
@@ -153,7 +204,7 @@ func (l *Loader) attachXDP() error {
 
 	xdpLink, err := link.AttachXDP(opts)
 	if err != nil {
-		return fmt.Errorf("failed to attach XDP: %w", err)
+		return fmt.Errorf("failed to attach XDP program: %w", err)
 	}
 
 	l.xdpLink = xdpLink
@@ -161,12 +212,11 @@ func (l *Loader) attachXDP() error {
 }
 
 // attachTC attaches the program to TC hook
-// Note: cilium/ebpf doesn't have direct TC support, so we use netlink directly
 func (l *Loader) attachTC(ingress bool) error {
 	progName := "tc_stress_prog"
 	prog := l.collection.Programs[progName]
 	if prog == nil {
-		return fmt.Errorf("%s not found", progName)
+		return fmt.Errorf("%s not found in eBPF collection", progName)
 	}
 
 	iface, err := netlink.LinkByName(l.config.Interface)
@@ -180,50 +230,50 @@ func (l *Loader) attachTC(ingress bool) error {
 		return fmt.Errorf("invalid program file descriptor")
 	}
 
-	// TC constants (from linux/pkt_cls.h)
-	const (
-		TC_H_INGRESS = 0xFFFFFFF1
-		TC_H_EGRESS  = 0xFFFFFFF2
-	)
-
-	var parent uint32
-	if ingress {
-		parent = TC_H_INGRESS
-	} else {
-		parent = TC_H_EGRESS
-	}
-
-	// Create qdisc
-	qdisc := &netlink.GenericQdisc{
+	// TC requires clsact qdisc to be attached to the interface first
+	// clsact is a special qdisc that allows attaching BPF programs
+	clsactQdisc := &netlink.GenericQdisc{
 		QdiscAttrs: netlink.QdiscAttrs{
 			LinkIndex: iface.Attrs().Index,
 			Handle:    netlink.MakeHandle(0xFFFF, 0),
-			Parent:    parent,
+			Parent:    netlink.HANDLE_CLSACT,
 		},
 		QdiscType: "clsact",
 	}
 
-	// Add qdisc if it doesn't exist (ignore error if exists)
-	_ = netlink.QdiscAdd(qdisc)
-	_ = netlink.QdiscDel(qdisc)
-	if err := netlink.QdiscAdd(qdisc); err != nil {
-		// Qdisc might already exist, try to add filter anyway
+	// Delete existing clsact qdisc if present (ignore errors)
+	_ = netlink.QdiscDel(clsactQdisc)
+	
+	// Add clsact qdisc
+	if err := netlink.QdiscAdd(clsactQdisc); err != nil {
+		return fmt.Errorf("failed to add clsact qdisc to %s: %w (try using --hook xdp instead)", l.config.Interface, err)
 	}
 
-	// Create filter
+	// Determine parent handle for ingress/egress
+	var parent uint32
+	if ingress {
+		parent = netlink.HANDLE_MIN_INGRESS
+	} else {
+		parent = netlink.HANDLE_MIN_EGRESS
+	}
+
+	// Create BPF filter
 	filter := &netlink.BpfFilter{
 		FilterAttrs: netlink.FilterAttrs{
 			LinkIndex: iface.Attrs().Index,
 			Parent:    parent,
-			Handle:    netlink.MakeHandle(1, 0),
-			Protocol:  3, // ETH_P_ALL
+			Handle:    1,
+			Protocol:  unix.ETH_P_ALL,
 			Priority:  1,
 		},
-		Fd:   progFD,
-		Name: progName,
+		Fd:           progFD,
+		Name:         progName,
+		DirectAction: true,
 	}
 
 	if err := netlink.FilterAdd(filter); err != nil {
+		// Cleanup qdisc on failure
+		_ = netlink.QdiscDel(clsactQdisc)
 		return fmt.Errorf("failed to add TC filter: %w", err)
 	}
 
@@ -237,14 +287,39 @@ func (l *Loader) attachTC(ingress bool) error {
 
 // attachSocket attaches the program to socket filter
 func (l *Loader) attachSocket() error {
-	// Socket filter attachment requires socket file descriptor
-	// This is a simplified example - actual implementation would need socket FD
-	return fmt.Errorf("socket filter attachment not yet implemented")
+	// Socket filter attachment requires a socket file descriptor
+	// This is typically used with raw sockets for packet capture
+	return fmt.Errorf("socket filter attachment requires socket FD - use XDP or TC instead")
+}
+
+// SetLoopCount updates the loop count dynamically
+func (l *Loader) SetLoopCount(loops uint32) error {
+	if l.loopCountMap == nil {
+		return fmt.Errorf("loop count map not initialized")
+	}
+	key := uint32(0)
+	return l.loopCountMap.Put(key, loops)
+}
+
+// SetEnabled enables or disables the stress program
+func (l *Loader) SetEnabled(enabled bool) error {
+	if l.enabledMap == nil {
+		return nil // Silently ignore if map doesn't exist
+	}
+	key := uint32(0)
+	val := uint32(0)
+	if enabled {
+		val = 1
+	}
+	return l.enabledMap.Put(key, val)
 }
 
 // Detach detaches the eBPF program from the hook
 func (l *Loader) Detach() error {
 	var errs []error
+
+	// Disable the program first
+	_ = l.SetEnabled(false)
 
 	if l.xdpLink != nil {
 		if err := l.xdpLink.Close(); err != nil {
@@ -254,7 +329,6 @@ func (l *Loader) Detach() error {
 	}
 
 	if l.tcLink != nil && l.tcIface != nil {
-		// Remove TC filter
 		if filter, ok := l.tcLink.(*netlink.BpfFilter); ok {
 			if err := netlink.FilterDel(filter); err != nil {
 				errs = append(errs, fmt.Errorf("failed to remove TC filter: %w", err))
@@ -289,56 +363,69 @@ func (l *Loader) GetStats() (*Stats, error) {
 		return nil, fmt.Errorf("collection not initialized")
 	}
 
-	packetsMap := l.collection.Maps["packets_processed_map"]
-	loopsMap := l.collection.Maps["total_loops_map"]
-
-	if packetsMap == nil || loopsMap == nil {
-		return nil, fmt.Errorf("stats maps not found")
-	}
-
 	key := uint32(0)
-	var stats Stats
+	stats := &Stats{}
 
-	// Per-CPU array maps: lookup returns an array of values (one per CPU)
-	// We need to read all CPU values and sum them
-	// Get the number of CPUs
-	cpuCount := 256 // Max reasonable CPU count
-	
-	var totalPackets, totalLoops uint64
-	
-	// Per-CPU array maps store values in an array
-	// We need to iterate and sum all CPU values
-	// For now, use a simpler approach: read the map and sum values
-	// Note: This is a simplified version - in production you'd get actual CPU count
-	for cpu := 0; cpu < cpuCount; cpu++ {
-		var packets, loops uint64
-		
-		// Per-CPU maps: lookup with key=0 returns array, we need to index by CPU
-		// Actually, cilium/ebpf handles this differently - lookup returns the value for current CPU context
-		// We need to iterate all possible CPUs or use a different approach
-		// For simplicity, let's just read once (this will give us one CPU's value)
-		if cpu == 0 {
-			if err := packetsMap.Lookup(key, &packets); err == nil {
-				totalPackets += packets
-			}
-			if err := loopsMap.Lookup(key, &loops); err == nil {
-				totalLoops += loops
-			}
+	// Read packets processed (per-CPU map - need to sum all CPUs)
+	if l.packetsMap != nil {
+		packets, err := l.sumPerCPUMap(l.packetsMap, key)
+		if err == nil {
+			stats.PacketsProcessed = packets
 		}
 	}
 
-	// Better approach: use map iterator or get all values
-	// For now, this is a limitation - we're only reading one CPU's values
-	// In a production system, you'd want to iterate all CPUs properly
-	
-	stats.PacketsProcessed = totalPackets
-	stats.TotalLoops = totalLoops
-
-	if totalPackets > 0 {
-		stats.LoopsPerPacket = float64(totalLoops) / float64(totalPackets)
+	// Read total loops
+	if l.loopsMap != nil {
+		loops, err := l.sumPerCPUMap(l.loopsMap, key)
+		if err == nil {
+			stats.TotalLoops = loops
+		}
 	}
 
-	return &stats, nil
+	// Read total bytes
+	if l.bytesMap != nil {
+		bytes, err := l.sumPerCPUMap(l.bytesMap, key)
+		if err == nil {
+			stats.TotalBytes = bytes
+		}
+	}
+
+	// Read total time
+	if l.timeMap != nil {
+		timeNs, err := l.sumPerCPUMap(l.timeMap, key)
+		if err == nil {
+			stats.TotalTimeNs = timeNs
+		}
+	}
+
+	// Calculate averages
+	if stats.PacketsProcessed > 0 {
+		stats.LoopsPerPacket = float64(stats.TotalLoops) / float64(stats.PacketsProcessed)
+		stats.AvgTimePerPacket = float64(stats.TotalTimeNs) / float64(stats.PacketsProcessed)
+	}
+
+	return stats, nil
+}
+
+// sumPerCPUMap reads all CPU values from a per-CPU array map and sums them
+func (l *Loader) sumPerCPUMap(m *ebpf.Map, key uint32) (uint64, error) {
+	// For per-CPU maps, we need to iterate through all possible CPUs
+	// The map returns a slice of values, one per CPU
+	var values []uint64
+	if err := m.Lookup(key, &values); err != nil {
+		// Try single value lookup as fallback
+		var singleValue uint64
+		if err := m.Lookup(key, &singleValue); err != nil {
+			return 0, err
+		}
+		return singleValue, nil
+	}
+
+	var total uint64
+	for _, v := range values {
+		total += v
+	}
+	return total, nil
 }
 
 // WaitForInterrupt waits for interrupt signal and detaches
