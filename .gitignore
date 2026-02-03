@@ -10,6 +10,11 @@ vendor/
 *.test
 *.out
 go.work
+go.sum
+
+# eBPF compiled objects
+bpf/obj/
+*.o
 
 # Generated files
 *.png
@@ -18,6 +23,18 @@ go.work
 af_packet_reproducer/metrics/
 packet-analyzer/metrics/*.png
 af_packet_reproducer/af_packet_reproducer
+
+# Component build directories
+ebpf-stress/bin/
+ebpf-stress/bpf/obj/
+ebpf-exporter/bin/
+ebpf-exporter/bpf/obj/
+traffic-generator/bin/
+packet-analyzer/bin/
+
+# Legacy ebpf-program (deprecated)
+ebpf-program/bin/
+ebpf-program/bpf/obj/
 
 # Logs
 *.log
@@ -37,3 +54,6 @@ Thumbs.db
 tmp/
 temp/
 *.tmp
+
+# Evidence directories
+*_evidence/

@@ -1,0 +1,12 @@
+# Build artifacts
+bin/
+bpf/obj/
+*.o
+
+# Go
+go.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp

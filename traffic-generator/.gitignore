@@ -1,0 +1,10 @@
+# Build artifacts
+bin/
+
+# Go
+go.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp

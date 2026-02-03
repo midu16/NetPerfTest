@@ -1,0 +1,87 @@
+# eBPF Exporter Configuration
+# 
+# This file configures the ebpf-exporter to collect metrics from eBPF programs
+# and optionally measure kernel stack packet latency independently.
+
+# Server configuration
+server:
+  port: 9091
+  # Poll interval for reading eBPF maps
+  poll_interval: 5s
+
+# ============================================================================
+# Mode 1: Read metrics from ebpf-stress (requires ebpf-stress running)
+# ============================================================================
+ebpf_stress:
+  enabled: true
+  # Path for pinned maps from ebpf-stress
+  pin_path: /sys/fs/bpf/ebpf-stress
+
+# ============================================================================
+# Mode 2: Independent kernel stack latency measurement
+# This mode attaches its own eBPF programs to measure cost per packet
+# independently of ebpf-stress.
+#
+# Metrics exported:
+#   - kernel_stack_latency_avg_ns: Average cost per packet in nanoseconds
+#   - kernel_stack_latency_histogram: Latency distribution
+#   - kernel_stack_packets_total: Total packets measured
+#
+# Note: Requires running as root or with CAP_BPF capability
+# ============================================================================
+latency_measurement:
+  enabled: true
+  # Path for latency measurement maps
+  pin_path: /sys/fs/bpf/ebpf-exporter
+  # Interfaces to attach latency measurement
+  interfaces:
+    - lo
+    - wlp1s0
+    - podman0
+
+# Interface configuration for metrics labeling
+interfaces:
+  # Monitor all interfaces (auto-discovery mode)
+  # - name: "*"
+  
+  # Or specify individual interfaces:
+  - name: lo
+    enabled: true
+  
+  - name: wlp1s0
+    enabled: true
+  
+  - name: podman0
+    enabled: true
+  
+  # Add more interfaces as needed
+  # - name: enp0s3
+  #   enabled: true
+
+# Metrics configuration
+metrics:
+  # ebpf-stress metrics
+  packets_total: true
+  loops_total: true
+  bytes_total: true
+  processing_time_ns_total: true
+  
+  # Calculated metrics
+  packets_per_second: true
+  loops_per_second: true
+  loops_per_packet: true
+  avg_time_per_packet_ns: true
+  
+  # System metrics
+  uptime_seconds: true
+  configured_loops: true
+  
+  # Latency measurement metrics (Mode 2)
+  kernel_stack_latency: true
+  latency_histogram: true
+
+# Logging configuration  
+logging:
+  verbose: true
+  # Log format: text or json
+  format: text
